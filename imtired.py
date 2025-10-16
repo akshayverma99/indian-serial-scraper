@@ -40,13 +40,27 @@ def infiniteWait():
     while True:
         sleep(delay_time)
 
+def cleanContext(context):
+    # set headers that mimic a real browser
+    context.add_init_script("""
+               Object.defineProperty(navigator, 'webdriver', {get: () => undefined})
+               window.chrome = {webstore: () => {}}
+           """)
+
+    # Set user agent to a real browser
+    context.add_init_script("""
+               Object.defineProperty(navigator, 'userAgent', {get: () => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'})
+           """)
+
+    # Set viewport size to a real browser
+    context.add_init_script("""
+               Object.defineProperty(window, 'innerWidth', {get: () => 1920})
+               Object.defineProperty(window, 'innerHeight', {get: () => 1080})
+           """)
+
 # -- ACTUAL SCRAPER FUNCTIONS --
 
 def exponential_backoff_wait(attempt_count):
-    """
-    Returns the appropriate delay time based on attempt count.
-    Progression: 2s → 10s → 1min → 30min → 1hour (capped at 1hour)
-    """
     if attempt_count < len(BACKOFF_DELAYS):
         return BACKOFF_DELAYS[attempt_count]
     else:
@@ -71,23 +85,7 @@ def extractDownloadUrlsFromEpisodePage(url):
         browser = p.chromium.launch(headless=False)
         context = browser.new_context(service_workers="block", accept_downloads=False)
         videoTitle = ""
-
-        # set headers that mimic a real browser
-        context.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', {get: () => undefined})
-            window.chrome = {webstore: () => {}}
-        """)
-
-        # Set user agent to a real browser
-        context.add_init_script("""
-            Object.defineProperty(navigator, 'userAgent', {get: () => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'})
-        """)    
-
-        # Set viewport size to a real browser
-        context.add_init_script("""
-            Object.defineProperty(window, 'innerWidth', {get: () => 1920})
-            Object.defineProperty(window, 'innerHeight', {get: () => 1080})
-        """)
+        cleanContext(context)
 
         # Stops their immediate browser closing
         def block_disable_devtool(route):
@@ -151,6 +149,7 @@ def getTVShowTitles(url):
         tvTitles = []
         browser = p.chromium.launch(headless=False)
         context = browser.new_context(service_workers="block", accept_downloads=False)
+        cleanContext(context)
 
         # Stops their immediate browser closing
         def block_disable_devtool(route):
@@ -179,6 +178,7 @@ def processShowPageByPage(showName):
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=False)
             context = browser.new_context(service_workers="block", accept_downloads=False)
+            cleanContext(context)
 
             # Stops their immediate browser closing
             def block_disable_devtool(route):
