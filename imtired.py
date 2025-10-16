@@ -1,97 +1,19 @@
 from playwright.sync_api import sync_playwright
-from uuid import uuid4
 from time import sleep
 import re
 import os
 import unicodedata
-import pprint
+import pickle
 
 # GLOBAL VARIABLES
-delay_time = 1
+delay_time = 5
 
 # Exponential backoff configuration
 BACKOFF_DELAYS = [2, 10, 60, 1800, 3600]  # 2s, 10s, 1min, 30min, 1hour
 
-# ----------
-# ----------
-# -- KEYS --
-# ----------
-# ----------
-# STATE KEYS
-SHOWS_KEY = "shows"
-NUMBER_OF_SHOWS_KEY = "numberOfShows"
-CURRENT_URL_KEY = "currentUrl"
-CURRENT_VIDEO_INDEX_KEY = "currentVideoIndex"
-# SHOW KEYS
-NUM_OF_DOWNLOADED_EPISODES_KEY = "numOfDownloadedEpisodes"
-NUM_OF_ACTUAL_EPISODES_KEY = "numOfActualEpisodes"
-EPISODES_KEY = "episodes"
-NAME_OF_SHOW_KEY = "nameOfShow"
-# --
-EPISODE_NAME_KEY = "episodeName"
-EPISODE_URL_KEY = "episodeUrl"
-EPISODE_DOWNLOADED_KEY = "episodeDownloaded"
-EPISODE_PATH_TO_FILE_KEY = "episodePathToFile"
-# --
-
-
-
-class state:
-    def __init__(self):
-        self.shows: [show] = []
-        self.currentUrl = ""
-        self.currentVideoIndex = 0
-
-    def toJSON(self):
-        return {
-            SHOWS_KEY: [show.toJSON() for show in self.shows],
-            NUMBER_OF_SHOWS_KEY: len(self.shows),
-            CURRENT_URL_KEY: self.currentUrl,
-            CURRENT_VIDEO_INDEX_KEY: self.currentVideoIndex,
-        }
-    
-    def fromJSON(self, stateJson):
-        self.shows = [show().fromJSON(showJson) for showJson in stateJson[SHOWS_KEY]]
-        self.currentUrl = stateJson[CURRENT_URL_KEY]
-        self.currentVideoIndex = stateJson[CURRENT_VIDEO_INDEX_KEY]
-        return self
-
-class show:
-    def __init__(self):
-        self.numOfActualEpisodes = 0
-        self.nameOfShow = ""
-        self.episodes: [episode] = []
-
-    def toJSON(self):
-        return {
-            NUM_OF_DOWNLOADED_EPISODES_KEY: len(self.episodes),
-            NUM_OF_ACTUAL_EPISODES_KEY: self.numOfActualEpisodes,
-            EPISODES_KEY: [episode.toJSON() for episode in self.episodes],
-            NAME_OF_SHOW_KEY: self.nameOfShow
-        }
-    
-    def fromJSON(self, showJson):
-        self.numOfActualEpisodes = showJson[NUM_OF_ACTUAL_EPISODES_KEY]
-        self.nameOfShow = showJson[NAME_OF_SHOW_KEY]
-        self.episodes = [episode().fromJSON(episodeJson) for episodeJson in showJson.get(EPISODES_KEY, [])]
-        return self
-
-class episode:
-    def __init__(self):
-        self.episodeName: str = ""
-        self.pathToFile: str = ""
-
-    def toJSON(self):
-        return {
-            EPISODE_NAME_KEY: self.episodeName,
-            EPISODE_PATH_TO_FILE_KEY: self.pathToFile,
-        }
-
-    def fromJSON(self, episodeJson):
-        self.episodeName = episodeJson[EPISODE_NAME_KEY]
-        self.pathToFile = episodeJson[EPISODE_PATH_TO_FILE_KEY]
-        return self
-
+# dict keys
+TITLE_KEY = "title"
+URL_KEY = "urls"
 
 # -- HELPER FUNCTIONS --
 
@@ -150,6 +72,23 @@ def extractDownloadUrlsFromEpisodePage(url):
         context = browser.new_context(service_workers="block", accept_downloads=False)
         videoTitle = ""
 
+        # set headers that mimic a real browser
+        context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined})
+            window.chrome = {webstore: () => {}}
+        """)
+
+        # Set user agent to a real browser
+        context.add_init_script("""
+            Object.defineProperty(navigator, 'userAgent', {get: () => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'})
+        """)    
+
+        # Set viewport size to a real browser
+        context.add_init_script("""
+            Object.defineProperty(window, 'innerWidth', {get: () => 1920})
+            Object.defineProperty(window, 'innerHeight', {get: () => 1080})
+        """)
+
         # Stops their immediate browser closing
         def block_disable_devtool(route):
             route.abort()
@@ -203,7 +142,7 @@ def extractDownloadUrlsFromEpisodePage(url):
         #FIXME: Add an error check and throw something up if that video doesnt have any download urls
         return {
             "title": videoTitle,
-            "urls": list(downloadUrls)
+            "urls": downloadUrls,
         }
 
 # Gets Every TV Show Title (don't need direct links because we're gonna use their url structure instead)
@@ -260,41 +199,16 @@ def processShowPageByPage(showName):
         # If no links, we've reached the end
         if len(links) == 0:
             break
+
+        while True:
+            # download every link and pop it
+            # Once its empty go to next page
+            # Do that all here instead of the outside loop so the above triggers when the page is actually empty
+            # -------------- MARK: WAS WORKING HERE --------------
+            urlDict = extractDownloadUrlsFromEpisodePage()
+            pass
             
-        print(f"Processing page {pageNum} with {len(links)} episodes")
-        
-        # Process each episode one by one
-        for i, link_element in enumerate(links):
-            episode_url = link_element.get_attribute("href")
-            if episode_url:
-                print(f"Processing episode {i+1}/{len(links)} on page {pageNum}: {episode_url}")
-                
-                # Extract download URLs for this episode in a separate browser context
-                try:
-                    result = extractDownloadUrlsFromEpisodePage(episode_url)
-                    if result["urls"]:
-                        # Download the first available URL
-                        download_url = result["urls"][0]
-                        title = result.get("title")
-                        
-                        if not title:
-                            print(f"No title found for episode, skipping: {episode_url}")
-                            continue
-                        
-                        print(f"Downloading: {title}")
-                        download_success = download_with_ytdlp(title, download_url)
-                        
-                        if not download_success:
-                            print(f"Download failed for: {title}")
-                    else:
-                        print(f"No download URLs found for: {episode_url}")
-                except Exception as e:
-                    print(f"Error processing episode {episode_url}: {e}")
-                    continue
-        
-        # Move to next page only after all episodes on current page are downloaded
-        pageNum += 1
-        print(f"Completed page {pageNum - 1}, moving to page {pageNum}")
+
         
         # Small delay between pages to be respectful
         sleep(delay_time)
@@ -317,7 +231,15 @@ def download_with_ytdlp(title, download_url):
 
 # -- MAIN METHODS --
 
-def run(state):
+def run():
+    titles = []
+    filename = "titles.pkl"
+    if os.path.exists(filename):
+        with open(filename, "rb") as f:
+            titles = pickle.dump(f)
+    if len(titles) == 0:
+        return
+
     # Get all TV show titles
     titles = getTVShowTitles("https://apnetv.biz/Hindi-Serials")
     
@@ -334,57 +256,21 @@ def run(state):
 
 if __name__ == "__main__":
 
-    # TODO = Pull the state from file
-
     # run()
-    # Create a state
-    stateTest = state()
 
-    showTest = show()
-    showTest.nameOfShow = "Gravity Falls"
-    # Create a show
-    episodeOne = episode()
-    episodeOne.episodeName = "Episode 1"
-    episodeOne.pathToFile = "Episode 1.mp4"
+    # Get all shows
 
-    episodeTwo = episode()
-    episodeTwo.episodeName = "Episode 2"
-    episodeTwo.pathToFile = "Episode 2.mp4"
+    # Go to episode page
+    # REPEAT -> Download the episode
+    # Go to the next page
 
-    showTest.episodes.append(episodeOne)
-    showTest.episodes.append(episodeTwo)
+    # if crashed then what does it need? Just the page and the download index
 
-    stateTest.shows.append(showTest)
+    d = extractDownloadUrlsFromEpisodePage("https://apnetv.biz/Hindi-Serial/show/274408/Bhabi-Ji-Ghar-Par-Hai")
+    print(d[URL_KEY].pop())
+    # download_with_ytdlp(d[TITLE_KEY], d[URL_KEY].pop())
 
-    showTestTwo = show()
-    showTestTwo.nameOfShow = "Gravity Falls 2"
-    showTestTwo.episodes.append(episodeOne)
-    showTestTwo.episodes.append(episodeTwo)
-    stateTest.shows.append(showTestTwo)
-
-    # pprint.pp(stateTest.toJSON())
-
-    stateTest.fromJSON(stateTest.toJSON())
-    pprint.pp(stateTest.toJSON())
-
-
-    # for show in getAllShowsDownloadLinks("Ishani"):
-    #     # downloadVideoAt(show)
-    #     infiniteWait()
-
-
-
-    # This flow doesnt work but this is what it'll look like
-    # -------------------------------------------------------
-    # -------------------------------------------------------
-    # titles = getTVShowTitles()
-    # for title in titles:
-    #     links = getAllShowsDownloadLinks()
-    #     for link in links:
-    #         getPageDownloadUrls(link)
-    # -------------------------------------------------------
-    # -------------------------------------------------------
-
-
+    # https://apnetv.biz/Hindi-Serial/show/273342/Aami-Dakini
+    # https://apnetv.biz/Hindi-Serial/show/274187/Mahabharat
 
     pass
