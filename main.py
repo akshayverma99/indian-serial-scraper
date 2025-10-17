@@ -112,6 +112,17 @@ def extractDownloadUrlsFromEpisodePage(url):
             videoTitle = page.locator(".episode-title-header h3").inner_text()
         else:
             videoTitle = page.locator(".contentp h2").first.inner_text()
+        
+        # Check if file already exists
+        safe_name = clean_title(videoTitle) + ".mp4"
+        if os.path.exists(safe_name):
+            print(f"File already exists, skipping: {safe_name}")
+            browser.close()
+            return {
+                "title": videoTitle,
+                "urls": set(),
+            }
+        
         ph = page.locator(".flash_link").nth(1)
         for x in range(3):
             with context.expect_page() as new_page_info:
@@ -227,12 +238,14 @@ def processShowPageByPage(showName):
             if not urls:
                 continue
             download_url = next(iter(urls))
+
             download_with_ytdlp(title, download_url)
             
 
         
         # Small delay between pages to be respectful
         sleep(delay_time)
+        pageNum += 1
     
     print(f"Completed processing all pages for show: {showName}")
 
@@ -263,7 +276,7 @@ def run():
     # only activates in theres a save file
     if os.path.exists(filename):
         with open(filename, "rb") as f:
-            state = pickle.dump(f)
+            state = pickle.load(f)
         if len(state.showsInDownloadQueue) == 0:
             return
 
