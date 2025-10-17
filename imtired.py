@@ -15,6 +15,13 @@ BACKOFF_DELAYS = [2, 10, 60, 1800, 3600]  # 2s, 10s, 1min, 30min, 1hour
 TITLE_KEY = "title"
 URL_KEY = "urls"
 
+class State:
+    def __init__(self):
+        self.showsInDownloadQueue = []
+        self.currentURL = ""
+        self.currentDownloadIndex = 0
+
+
 # -- HELPER FUNCTIONS --
 
 # Cleans strings for the terminal
@@ -194,19 +201,33 @@ def processShowPageByPage(showName):
             
             # Get all episode links on this page
             links = page.locator(".shows-box a").all()
+
+            # Extract hrefs before closing the browser
+            hrefs = []
+            for a in links:
+                href = a.get_attribute("href")
+                if not href:
+                    print("No href found for link: " + a.inner_text())
+                hrefs.append(href)
+
             browser.close()
         
         # If no links, we've reached the end
-        if len(links) == 0:
+        if len(hrefs) == 0:
             break
 
-        while True:
+        for episode_url in hrefs:
             # download every link and pop it
             # Once its empty go to next page
             # Do that all here instead of the outside loop so the above triggers when the page is actually empty
             # -------------- MARK: WAS WORKING HERE --------------
-            urlDict = extractDownloadUrlsFromEpisodePage()
-            pass
+            urlDict = extractDownloadUrlsFromEpisodePage(episode_url)
+            title = urlDict[TITLE_KEY]
+            urls = urlDict[URL_KEY]
+            if not urls:
+                continue
+            download_url = next(iter(urls))
+            download_with_ytdlp(title, download_url)
             
 
         
@@ -215,12 +236,12 @@ def processShowPageByPage(showName):
     
     print(f"Completed processing all pages for show: {showName}")
 
-def getAllShowsDownloadLinks(showName):
-    """Legacy function - kept for compatibility but now just calls processShowPageByPage"""
-    showName = showName.lstrip().rstrip().replace(" ","-")
-    print(f"Legacy call to getAllShowsDownloadLinks for: {showName}")
-    # This function is now deprecated in favor of processShowPageByPage
-    return []
+# def getAllShowsDownloadLinks(showName):
+#     """Legacy function - kept for compatibility but now just calls processShowPageByPage"""
+#     showName = showName.lstrip().rstrip().replace(" ","-")
+#     print(f"Legacy call to getAllShowsDownloadLinks for: {showName}")
+#     # This function is now deprecated in favor of processShowPageByPage
+#     return []
 
 def download_with_ytdlp(title, download_url):
     safe_name = clean_title(title) + ".mp4"
@@ -229,22 +250,33 @@ def download_with_ytdlp(title, download_url):
     print(f"Download completed: {safe_name}")
     return True
 
+def TEST_download_with_ytdlp(title, download_url):
+    print("__DOWNLOADING__")
+    sleep(20)
+
 # -- MAIN METHODS --
 
 def run():
-    titles = []
-    filename = "titles.pkl"
+    state = State()
+    filename = "state.pkl"
+
+    # only activates in theres a save file
     if os.path.exists(filename):
         with open(filename, "rb") as f:
-            titles = pickle.dump(f)
-    if len(titles) == 0:
-        return
+            state = pickle.dump(f)
+        if len(state.showsInDownloadQueue) == 0:
+            return
+
 
     # Get all TV show titles
-    titles = getTVShowTitles("https://apnetv.biz/Hindi-Serials")
+    state.showsInDownloadQueue = getTVShowTitles("https://apnetv.biz/Hindi-Serials")
     
+    # Pickle the titles
+    with open(filename, "wb") as f:
+        pickle.dump(state, f)
+
     # Process each show page by page, downloading immediately
-    for show_name in titles:
+    for show_name in state.showsInDownloadQueue:
         print(f"\n=== Starting to process show: {show_name} ===")
         try:
             processShowPageByPage(show_name)
@@ -252,11 +284,16 @@ def run():
         except Exception as e:
             print(f"Error processing show {show_name}: {e}")
             continue
+        # Remove the current show_name from the titles list and re-pickle
+        state.showsInDownloadQueue.remove(show_name)
+        with open(filename, "wb") as f:
+            pickle.dump(state, f)
 
 
 if __name__ == "__main__":
 
-    # run()
+    run()
+    print("__DONE__")
 
     # Get all shows
 
@@ -266,8 +303,8 @@ if __name__ == "__main__":
 
     # if crashed then what does it need? Just the page and the download index
 
-    d = extractDownloadUrlsFromEpisodePage("https://apnetv.biz/Hindi-Serial/show/274408/Bhabi-Ji-Ghar-Par-Hai")
-    print(d[URL_KEY].pop())
+    # d = extractDownloadUrlsFromEpisodePage("https://apnetv.biz/Hindi-Serial/show/274408/Bhabi-Ji-Ghar-Par-Hai")
+    # print(d[URL_KEY].pop())
     # download_with_ytdlp(d[TITLE_KEY], d[URL_KEY].pop())
 
     # https://apnetv.biz/Hindi-Serial/show/273342/Aami-Dakini
