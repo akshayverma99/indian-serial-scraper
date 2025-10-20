@@ -1,4 +1,4 @@
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 from time import sleep
 import re
 import os
@@ -65,6 +65,48 @@ def cleanContext(context):
                Object.defineProperty(window, 'innerHeight', {get: () => 1080})
            """)
 
+# Robust title getter (avoids 30s timeout on missing selectors)
+def robust_get_title(page, url) -> str:
+    """
+    Try several selectors quickly and fall back gracefully to <title> or URL slug.
+    """
+    candidate_selectors = [
+        ".episode-title-header h3",
+        "header .episode-title-header h3",
+        ".contentp h2",
+        "h1",
+        "h2",
+    ]
+    for sel in candidate_selectors:
+        try:
+            el = page.wait_for_selector(sel, timeout=3000, state="visible")
+            txt = el.inner_text().strip()
+            if txt:
+                return txt
+        except PlaywrightTimeoutError:
+            continue
+        except Exception:
+            continue
+
+    # Fallback 1: document title
+    try:
+        t = page.title().strip()
+        if t:
+            return t
+    except Exception:
+        pass
+
+    # Fallback 2: build something from the URL slug
+    try:
+        slug = url.rstrip("/").split("/")[-1]
+        slug = slug.replace("-", " ").strip()
+        if slug:
+            return slug
+    except Exception:
+        pass
+
+    return "Untitled Episode"
+
 # -- ACTUAL SCRAPER FUNCTIONS --
 
 def exponential_backoff_wait(attempt_count):
@@ -76,11 +118,21 @@ def exponential_backoff_wait(attempt_count):
 def cloudflareCheck(page):
     # NOTE: -- Cloudflare blocking check with exponential backoff --
     attempt_count = 0
-    while "Cloudflare" in page.title():
+    # Using title check here because the challenge often sets it
+    while True:
+        try:
+            title_text = page.title()
+        except Exception:
+            title_text = ""
+        if "Cloudflare" not in title_text:
+            break
         delay = exponential_backoff_wait(attempt_count)
         print(f"Cloudflare detected, waiting {delay} seconds (attempt {attempt_count + 1})")
         sleep(delay)
-        page.reload()
+        try:
+            page.reload()
+        except Exception:
+            pass
         attempt_count += 1
 
 # -- PLAYWRIGHT FUNCTIONS --
@@ -105,14 +157,15 @@ def extractDownloadUrlsFromEpisodePage(url):
         context.on("page", lambda new_page: new_page.route("**/*disable-devtool", block_disable_devtool))
 
         page = context.new_page()
-        page.goto(url,
-                  wait_until="domcontentloaded")
+        page.set_default_timeout(60000)  # be a bit more patient overall
+        page.goto(url, wait_until="domcontentloaded")
 
-        if "apnetv.biz" in page.url:
-            videoTitle = page.locator(".episode-title-header h3").inner_text()
-        else:
-            videoTitle = page.locator(".contentp h2").first.inner_text()
-        
+        # IMPORTANT: wait out Cloudflare before touching the DOM
+        cloudflareCheck(page)
+
+        # Use resilient title getter
+        videoTitle = robust_get_title(page, url)
+
         # Check if file already exists
         safe_name = clean_title(videoTitle) + ".mp4"
         if os.path.exists(safe_name):
@@ -122,19 +175,23 @@ def extractDownloadUrlsFromEpisodePage(url):
                 "title": videoTitle,
                 "urls": set(),
             }
-        
-        ph = page.locator(".flash_link").nth(1)
-        for x in range(3):
-            with context.expect_page() as new_page_info:
-                ph.click()
 
-        # Cant wait for the dom to load fully because they keep it perma-loading
-        # so we wait just long enough for everything to load
+        # Try clicking the flash link if present; don't fail if not
+        try:
+            ph = page.locator(".flash_link").nth(1)
+            ph.wait_for(state="visible", timeout=5000)
+            for _ in range(3):
+                with context.expect_page() as _new_page_info:
+                    ph.click()
+        except PlaywrightTimeoutError:
+            print("Flash link not found/visible; continuing to scan iframes anyway.")
+        except Exception as e:
+            print(f"Error clicking flash links: {e}")
+
+        # Wait just long enough for iframes/tabs to populate
         sleep(delay_time)
 
         for tab in context.pages:
-            # print(tab.locator("iframe"))
-
             # Silent error handling (not important)
             if tab.is_closed():
                 continue
@@ -148,14 +205,14 @@ def extractDownloadUrlsFromEpisodePage(url):
             for x in frames:
                 url_placeholder = x.get_attribute("src")
                 if (url_placeholder is not None) and (".m3u8" in url_placeholder):
-                    # Fancy regex magic that basically isolates their m3u8 file from the url
-                    # If you keep the original url they require a bunch of fancy permissions but the m3u8 file
-                    # server doesnt give a fuck
-                    downloadUrls.add(re.search(r"(?<=\?url=).+$", url_placeholder).group(0))
+                    # Isolate m3u8 file from the wrapper URL
+                    m = re.search(r"(?<=\?url=).+$", url_placeholder)
+                    if m:
+                        downloadUrls.add(m.group(0))
 
         browser.close()
 
-        #FIXME: Add an error check and throw something up if that video doesnt have any download urls
+        # Return title + any candidate m3u8 URLs
         return {
             "title": videoTitle,
             "urls": downloadUrls,
@@ -228,9 +285,6 @@ def processShowPageByPage(showName):
             break
 
         for episode_url in hrefs:
-            # download every link and pop it
-            # Once its empty go to next page
-            # Do that all here instead of the outside loop so the above triggers when the page is actually empty
             # -------------- MARK: WAS WORKING HERE --------------
             urlDict = extractDownloadUrlsFromEpisodePage(episode_url)
             title = urlDict[TITLE_KEY]
@@ -241,8 +295,6 @@ def processShowPageByPage(showName):
 
             download_with_ytdlp(title, download_url)
             
-
-        
         # Small delay between pages to be respectful
         sleep(delay_time)
         pageNum += 1
@@ -279,7 +331,6 @@ def run():
             state = pickle.load(f)
         if len(state.showsInDownloadQueue) == 0:
             return
-
 
     # Get all TV show titles
     state.showsInDownloadQueue = getTVShowTitles("https://apnetv.biz/Hindi-Serials")
